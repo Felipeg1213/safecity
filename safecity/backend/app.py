@@ -2,12 +2,14 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime, timedelta
 import math
+import uuid
 
 app = Flask(__name__)
 CORS(app)
 
 # En producción usar Redis o PostgreSQL con PostGIS
 active_users: dict = {}  # { user_id: {lat, lng, timestamp} }
+alerts: dict = {}        # { alert_id: {user_id, type, description, severity, lat, lng, timestamp, image_url} }
 
 
 def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -107,6 +109,64 @@ def health():
         'users_online': len(active_users),
         'timestamp': datetime.utcnow().isoformat(),
     }), 200
+
+
+VALID_SEVERITIES = {'critical', 'high', 'medium', 'low'}
+
+
+@app.route('/alerts', methods=['POST'])
+def create_alert():
+    """Crea una nueva alerta de seguridad."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Body JSON requerido'}), 400
+
+    user_id     = data.get('user_id')
+    alert_type  = data.get('type')
+    description = data.get('description')
+    severity    = data.get('severity')
+    lat         = data.get('lat')
+    lng         = data.get('lng')
+
+    if not all([user_id, alert_type, description, severity, lat is not None, lng is not None]):
+        return jsonify({'error': 'Faltan parámetros: user_id, type, description, severity, lat, lng'}), 400
+
+    if severity not in VALID_SEVERITIES:
+        return jsonify({'error': f'severity inválido. Valores permitidos: {sorted(VALID_SEVERITIES)}'}), 400
+
+    alert_id = str(uuid.uuid4())
+    alerts[alert_id] = {
+        'id':          alert_id,
+        'user_id':     user_id,
+        'type':        alert_type,
+        'description': description,
+        'severity':    severity,
+        'lat':         float(lat),
+        'lng':         float(lng),
+        'image_url':   data.get('image_url'),
+        'timestamp':   datetime.utcnow().isoformat(),
+    }
+
+    return jsonify({'status': 'created', 'alert': alerts[alert_id]}), 201
+
+
+@app.route('/alerts/<alert_id>', methods=['DELETE'])
+def delete_alert(alert_id):
+    """Elimina una alerta. Solo el creador puede borrarla."""
+    if alert_id not in alerts:
+        return jsonify({'error': 'Alerta no encontrada'}), 404
+
+    data    = request.get_json(silent=True) or {}
+    user_id = data.get('user_id')
+
+    if not user_id:
+        return jsonify({'error': 'user_id requerido en el body'}), 400
+
+    if alerts[alert_id]['user_id'] != user_id:
+        return jsonify({'error': 'No tienes permiso para eliminar esta alerta'}), 403
+
+    del alerts[alert_id]
+    return jsonify({'status': 'deleted', 'alert_id': alert_id}), 200
 
 
 if __name__ == '__main__':
